@@ -4,6 +4,7 @@
 
 --------------------------
 
+#### Descarga de Gdb-peda
 
 Primero descargamos el plugin de Gdb para tener Gdb-peda:
 
@@ -13,6 +14,8 @@ Creamos el fichero .gdbinit:
 
 ![Screenshot](images/Screenshot_2.jpg)
 
+#### Estudio del código
+
 Ejecutamos el binario y vemos que hay que incluir el "nombre de tu equipo":
 
 ![Screenshot](images/Screenshot_3.jpg)
@@ -21,13 +24,15 @@ Si vemos el código, utiliza el método vulnerable "gets()", al que se le pasa u
 
 ![Screenshot](images/Screenshot_4.jpg)
 
-Esto llama a que va a ser un buffer overflow. Entonces lo primero es ver si podemos **controlar el registro RIP** (como el EIP de 32 bits, pero este binario es de 64 bits). 
+#### Control de EIP
 
-Podemos generar los "patterns" de manera rápida con gdb-peda de esta manera, que crea un fichero en el directorio en el que estás corriendo gdb:
+Esta función es vulnerable a buffer overflows. Lo primero es ver si podemos controlar el registro RIP (que es como el EIP de 32 bits). 
+
+Podemos generar los "patterns" de manera rápida con gdb-peda con el comando siguiente, que crea un fichero en el directorio en el que gdb está corriendo:
 
 ![Screenshot](images/Screenshot_5.jpg)
 
-Lo ejecutamos y gdb-peda nos muestra el valor de los registros cuando se genera la excepción (alright!). De momento usamos Python y mandamos 268 caracteres con:
+Sin embargo, en este caso lo puedes ir probando a mano, hasta que se llega a que con 268 caracteres podemos sobrescribir el registro RIP. Ejecutamos el comando siguiente y gdb-peda nos muestra el valor de los registros cuando se genera la excepción.
 
 ```
 run <<< $(python -c "print 'A'*268)
@@ -53,37 +58,35 @@ run <<< $(python -c "print '\x90'*264+'A'*6")
 
 ![Screenshot](images/Screenshot_9.jpg)
 
-Pero aunque lo intentemos, no podremos porque el NX está habilitado! Lo primero que hay que hacer, es comprobar las medidas de seguridad que tiene el binario con *checksec* de GDB! [Aquí explican algunas de estas protecciones](https://security.stackexchange.com/questions/20497/stack-overflows-defeating-canaries-aslr-dep-nx):
+#### ROPs 
+
+Pero aunque lo intentemos, no podremos porque al estar habilitadp el NX, el stack no es ejecutable. Las medidas de seguridad que tiene el binario se pueden ver con *checksec* de GDB ([aquí explican algunas de estas protecciones](http://blog.siphos.be/2011/07/high-level-explanation-on-some-binary-executable-security/)):
 
 ![Screenshot](images/Screenshot_10.jpg)
 
-Por tanto, no podemos hacer el BOF típico, hay que hacer un ROP (de la [Wikipedia](https://en.wikipedia.org/wiki/Return-to-libc_attack): *A non-executable stack can prevent some buffer overflow exploitation, however it cannot prevent a return-to-libc attack because in the return-to-libc attack only existing executable code is used.*). En primer lugar, tenemos que saber cómo se hacen las llamadas al sistema o syscalls en 64 bits, que son distintas a como se hacen en 32 bits. Hay que tener en cuenta que en función del valor de RAX se hará una llamada u otra, y que el resto de argumentos van en otros registros empezando por RDI, RSX y RDI:
+Por tanto, no podemos hacer el BOF típico sino que hay hacer un [ROP](https://en.wikipedia.org/wiki/Return-to-libc_attack).
+
+En primer lugar, tenemos que saber cómo se hacen las llamadas al sistema o syscalls en 64 bits, que son distintas a como se hacen en 32 bits. Hay que tener en cuenta que en función del valor de RAX ([aquí tenemos los posibles valores de RAX](https://blog.rchapman.org/posts/Linux_System_Call_Table_for_x86_64/)) se hará una llamada u otra, y que el resto de argumentos van en otros registros empezando por RDI, RSX y RDI:
 
 ![Screenshot](images/Screenshot_11.jpg)
 
-El valor de RAX y algunas llamadas al sistema ([aquí tenemos todas](https://blog.rchapman.org/posts/Linux_System_Call_Table_for_x86_64/)):
-
-![Screenshot](images/Screenshot_12.jpg)
-
+#### Estudio del binario
 
 Ahora hay que mirar cómo está hecho el binario:
 
-- stripped: No hay debugging symbols 
+- Stripped: No hay debugging symbols 
 
-- statically linked: Las funciones de libc están embebidas en el binario
+- Statically linked: Las funciones de libc (puts, printf, gets) están embebidas en el binario 
 
-Los problemas que tiene este binario es que:
+Esto hace que este binario sea problemático:
 
-- No me sirve *objdump -D BINARIO*
+- No puedo usar "*objdump -D BINARIO*" o "*nm -D BINARIO*" para ver "debugging symbols" (por ser "Stripped")
 
-- No me sirve *nm -D BINARIO*
-
-- No puedo hacer *system* en GDB
-
-- No está cargado lib.so en el binario, lo podríamos haber usado para sacar direcciones de algunas funciones
-
+- No está cargado lib.so en el binario, lo podríamos haber usado para sacar direcciones de algunas funciones en lugar de buscarlas dentro del binario (por ser "Statically linked")
 
 ![Screenshot](images/Screenshot_13.jpg)
+
+#### Encontrar gadgets para el ROP
 
 Ahora tenemos que buscar los "gadgets" en el binario. Para esto utilizamos el programa de [Github ROPgadget](https://github.com/JonathanSalwan/ROPgadget). Lo ejecutamos y muestra todos los gadgets:
 
@@ -99,13 +102,7 @@ Lo que queremos hacer es una llamada al sistema. Para eso vamos a buscar los gad
 
 ![Screenshot](images/Screenshot_16.jpg)
 
-Por lo que:
-
-- RDI es const char *filename
-
-- RSI es const char *const argv[]
-
-- RDX es const char *const envp[
+De lo que RDI es "const char filename" (nombre del fichero), RSI es "const char const argv[]" (argumentos de entrada) y  RDX es "const char const envp[" (no relevante en este caso).
 
 Lo que tenemos que buscar en la salida de ROPgadget son de este tipo:
 
@@ -120,6 +117,8 @@ Lo que tenemos que buscar en la salida de ROPgadget son de este tipo:
 - syscall; ret; 
 
 ![Screenshot](images/Screenshot_17.jpg)
+
+#### Creando el exploit
 
 Lo que tenemos entonces es:
 
@@ -230,9 +229,13 @@ sock.sendline("/bin/sh")   <== Mandamos un comando que se escribirá en la parte
 
 sock.interactive()         <== Tras esto tendríamos la shell
 ```
-Lo que falta: cómo sacar la dirección de la función gets() del binario! Se supone que es 0x4004ee pero no lo consigo sacar de manera rápida, supongo que hay que meterse a fondo con IDA o algo parecido.
+#### Lo que falta
 
-La otra gran alternativa es lo que hacen [aquí](https://github.com/kam1tsur3/2020_CTF/blob/master/zer0pts/pwn/hipwn/solve.py), donde hace dos llamadas al sistema:
+No sabemos cómo sacar la dirección de la función gets() del binario! Se supone que es 0x4004ee pero no lo consigo sacar de manera rápida, supongo que hay que meterse a fondo con IDA o algo parecido.
+
+#### Alternativa 
+
+La alternativa para no utilizar la dirección de la función gets() es lo que hacen [aquí](https://github.com/kam1tsur3/2020_CTF/blob/master/zer0pts/pwn/hipwn/solve.py), donde hace dos llamadas al sistema:
 
 - La primera hace un READ con RAX(0), RDI(0), RSI(Dirección del BSS), RDX(0x200)
 
